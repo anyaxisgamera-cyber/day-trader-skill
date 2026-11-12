@@ -7,11 +7,11 @@ import unittest
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, ROOT, FIX
+from _load import SKILLS
 
 check = load("trader-risk", "check")
-ticket = load("trader-broker", "ticket")
 
-CFG_PATH = os.path.join(ROOT, "trader-budget", "config.example.json")
+CFG_PATH = os.path.join(SKILLS, "trader-budget", "config.example.json")
 TSLA_PATH = os.path.join(FIX, "trader-risk", "orders-tsla.json")
 V1_ORDERS_PATH = os.path.join(FIX, "trader-risk", "orders-reel.json")
 NOW = "2026-10-19 10:15"
@@ -106,13 +106,11 @@ class TheReel(unittest.TestCase):
         self.assertEqual(res["results"][0]["reasons"],
                          ["loss: 9 shares x 5.86 risk a share = $52.74 at the stop, over your $50 max loss per trade"])
 
-    def test_fingerprint_is_shared_with_the_broker(self):
+    def test_fingerprint_identifies_the_exact_order(self):
         o = tsla()
-        self.assertEqual(check.fingerprint(o), ticket.fingerprint(o))
         self.assertEqual(check.fingerprint(dict(o, why="anything", plan={})), check.fingerprint(o))
         self.assertNotEqual(check.fingerprint(dict(o, qty="9")), check.fingerprint(o))
         self.assertNotEqual(check.fingerprint(dict(o, stop_loss_stop_price="358.00")), check.fingerprint(o))
-        self.assertEqual(check.ALPACA_FIELDS, ticket.ALPACA_FIELDS)
 
     def test_cli(self):
         with tempfile.TemporaryDirectory() as d:

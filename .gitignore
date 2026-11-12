@@ -1,0 +1,10 @@
+# Working data the skills write: watchlists, prices, paper orders, risk verdicts,
+# and trader/config.json (which can hold your SEC User-Agent name and email).
+trader/
+
+# Personal Claude Code overrides
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc

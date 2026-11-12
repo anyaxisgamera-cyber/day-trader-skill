@@ -1,20 +1,32 @@
+"""Invariants of the curated, research-only install (audited commit 3d0f4ef, 7 skills).
+
+These replace the upstream repo-layout tests: the layout changed on purpose
+(skills moved to .claude/skills/, four skills removed, plugin manifest removed).
+"""
+
+import hashlib
 import json
 import os
 import re
 import unittest
 
-from _load import ROOT
+from _load import ROOT, SKILLS as SKILLS_DIR
 
-# v2, the day-trading pack: the eleven folders the reel's repo card shows
-SKILLS = ["trader-scanner", "trader-news", "trader-entry", "trader-exit", "trader-timemachine",
-          "trader-risk", "trader-budget", "trader-broker", "trader-alerts", "trader-analyst",
-          "trader-pelosi"]
-ABOUT = ("11 Claude skills for day trading: scan thousands of charts, track breaking news, time every "
-         "entry and exit, and replay every outcome before you risk a dollar.")
-# skills on the way to an order carry the safety block
-ORDER_PATH = ["trader-scanner", "trader-entry", "trader-exit", "trader-timemachine", "trader-budget",
-              "trader-pelosi", "trader-risk", "trader-broker", "trader-alerts"]
-V1_ONLY = ["trader-copycat", "trader-screener", "trader-tax", "trader-rebalance"]
+KEPT = ["trader-scanner", "trader-news", "trader-timemachine", "trader-analyst",
+        "trader-risk", "trader-budget", "trader-alerts"]
+REMOVED = ["trader-broker", "trader-entry", "trader-exit", "trader-pelosi"]
+REMOVED_SCRIPTS = ["ticket.py", "entry.py", "exit.py", "ptr.py", "claude_desktop_config.example.json"]
+
+# sha256 of each tool as audited at 3d0f4ef. A change here must be re-reviewed.
+AUDITED_SHA256 = {
+    "trader-scanner/scan.py": "2cc0d99a4f21d2b8a28b6917d527ca17e3a71dea0951365d5f82c6b5afcac913",
+    "trader-news/news.py": "bf9e12a9c5962de3f661bf334e76f4df417a39879ff067426b338b7a063c71f3",
+    "trader-timemachine/timemachine.py": "5e73d566c78e5e42142371319491eef6257b6fc31fab5a87aa62506d03e9b5a1",
+    "trader-analyst/facts.py": "6cd7e24588e7389268cd6af6315768bd9c292032773fe1a7364e07696d7ac6b9",
+    "trader-risk/check.py": "6faf9372c20d30b33dbc6175d0d81935f8dc88bc8e94aacd2ed0ae6919aafa18",
+    "trader-budget/size.py": "2dcb2ef604a92fb022ca210eb67a9b28ef82fefe5f7a2382ce2592461a6d3cba",
+    "trader-alerts/alerts.py": "2db22d8e9b27ff1776600dd53664e21b55fc8787ed1abdd9e6f1e79bcc80c74f",
+}
 
 
 def frontmatter(path):
@@ -24,115 +36,140 @@ def frontmatter(path):
     return (m.group(1) if m else ""), text
 
 
-def every_text_file():
+def every_file():
     for base, dirs, files in os.walk(ROOT):
         dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
         for f in files:
-            if f.endswith((".md", ".py", ".json", ".csv", ".txt", ".xml")) or f == "LICENSE":
-                yield os.path.join(base, f)
+            yield os.path.join(base, f)
 
 
-class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
-        found = sorted(d for d in os.listdir(ROOT)
-                       if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
-        self.assertEqual(found, sorted(SKILLS))
+def settings():
+    with open(os.path.join(ROOT, ".claude", "settings.json"), encoding="utf-8") as fh:
+        return json.load(fh)
 
-    def test_root_matches_the_reel(self):
-        root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
 
-    def test_frontmatter_name_and_description(self):
-        for s in SKILLS:
-            fm, text = frontmatter(os.path.join(ROOT, s, "SKILL.md"))
+class InstalledSkills(unittest.TestCase):
+    def test_exactly_the_seven_skills_are_installed(self):
+        found = sorted(d for d in os.listdir(SKILLS_DIR)
+                       if os.path.isfile(os.path.join(SKILLS_DIR, d, "SKILL.md")))
+        self.assertEqual(found, sorted(KEPT))
+
+    def test_frontmatter_names_match_their_folders(self):
+        for s in KEPT:
+            fm, _ = frontmatter(os.path.join(SKILLS_DIR, s, "SKILL.md"))
             self.assertIn("name: %s\n" % s, fm + "\n", s)
             self.assertRegex(fm, r"description: ", s)
-            self.assertGreater(len(fm), 200, "%s description is too thin" % s)
-            self.assertGreater(len(text.splitlines()), 60, s)
 
-    def test_order_path_skills_carry_the_safety_rule(self):
-        for s in ORDER_PATH:
-            _, text = frontmatter(os.path.join(ROOT, s, "SKILL.md"))
+    def test_no_skill_grants_itself_tools(self):
+        for s in KEPT:
+            fm, _ = frontmatter(os.path.join(SKILLS_DIR, s, "SKILL.md"))
+            self.assertNotIn("allowed-tools", fm, s)
+
+    def test_tools_are_the_audited_bytes(self):
+        for rel, want in AUDITED_SHA256.items():
+            with open(os.path.join(SKILLS_DIR, rel), "rb") as fh:
+                self.assertEqual(hashlib.sha256(fh.read()).hexdigest(), want, rel)
+
+
+class RemovedSkills(unittest.TestCase):
+    def test_removed_skill_folders_are_gone_everywhere(self):
+        for base, dirs, _ in os.walk(ROOT):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for d in dirs:
+                self.assertNotIn(d, REMOVED, os.path.join(base, d))
+
+    def test_removed_scripts_and_plugin_manifest_are_gone(self):
+        names = {os.path.basename(p) for p in every_file()}
+        for f in REMOVED_SCRIPTS:
+            self.assertNotIn(f, names, f)
+        self.assertFalse(os.path.exists(os.path.join(ROOT, ".claude-plugin")))
+
+
+class NoBrokerNoAutomation(unittest.TestCase):
+    def test_every_skill_carries_the_installation_safety_block(self):
+        for s in KEPT:
+            _, text = frontmatter(os.path.join(SKILLS_DIR, s, "SKILL.md"))
             low = " ".join(text.lower().split())
+            self.assertIn("## safety (this installation)", low, s)
+            self.assertIn("no broker connection and no order execution", low, s)
+            self.assertIn("never put it on `/loop`, a scheduled task", low, s)
             self.assertIn("not financial advice", low, s)
-            self.assertIn("yes", low, s)
 
-    def test_plugin_manifest_points_at_the_root_skills(self):
-        with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
-            plugin = json.load(fh)
-        self.assertEqual(plugin["name"], "day-trader-skill")
-        self.assertEqual(plugin["skills"], "./")
-        self.assertEqual(plugin["description"], ABOUT)
-        with open(os.path.join(ROOT, ".claude-plugin", "marketplace.json")) as fh:
-            market = json.load(fh)
-        self.assertEqual(market["name"], "day-trader-skill")
-        self.assertEqual(market["plugins"][0]["name"], "day-trader-skill")
+    def test_no_skill_tells_claude_to_schedule_or_loop_itself(self):
+        for s in KEPT:
+            _, text = frontmatter(os.path.join(SKILLS_DIR, s, "SKILL.md"))
+            for bad in ("/loop 15m", "/loop 1h", "scheduled task each", "every few minutes from",
+                        "call `place_stock_order`", "connect alpaca"):
+                self.assertNotIn(bad, text.lower(), "%s: %s" % (s, bad))
 
-    def test_readme_carries_the_reel_copy(self):
-        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
-            readme = " ".join(fh.read().split())
-        self.assertTrue(readme.startswith("# The Day Trader skill"))
-        for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/day-trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/day-trader-skill",
-                     "/plugin install day-trader-skill@day-trader-skill",
-                     "## Fine print"):
-            self.assertIn(line, readme)
-        for s in SKILLS:
-            self.assertIn("/" + s, readme, s)
+    def test_alerts_is_manual_only(self):
+        fm, _ = frontmatter(os.path.join(SKILLS_DIR, "trader-alerts", "SKILL.md"))
+        self.assertIn("disable-model-invocation: true", fm)
+        self.assertEqual(settings()["skillOverrides"]["trader-alerts"], "user-invocable-only")
 
-    def test_no_em_dashes_and_no_personal_email(self):
-        for path in every_text_file():
+    def test_settings_keep_normal_permission_mode(self):
+        p = settings()["permissions"]
+        self.assertEqual(p["defaultMode"], "default")
+        self.assertEqual(p["disableBypassPermissionsMode"], "disable")
+        self.assertEqual(p["disableAutoMode"], "disable")
+        self.assertEqual(p.get("allow", []), [])
+        self.assertIs(settings()["enableAllProjectMcpServers"], False)
+
+    def test_settings_deny_brokers_and_scheduling(self):
+        deny = set(settings()["permissions"]["deny"])
+        for rule in ("mcp__alpaca", "mcp__alpaca__*", "mcp__ibkr", "CronCreate", "ScheduleWakeup",
+                     "RemoteTrigger", "Monitor", "Bash(uvx *)", "Bash(claude mcp *)", "Bash(crontab *)"):
+            self.assertIn(rule, deny, rule)
+        self.assertEqual(settings()["skillOverrides"]["loop"], "off")
+
+    def test_no_mcp_server_config_ships_in_the_repo(self):
+        names = {os.path.basename(p) for p in every_file()}
+        self.assertNotIn(".mcp.json", names)
+        self.assertNotIn("claude_desktop_config.json", names)
+
+    def test_paper_and_no_leverage_in_the_example_config(self):
+        with open(os.path.join(SKILLS_DIR, "trader-budget", "config.example.json")) as fh:
+            cfg = json.load(fh)
+        self.assertIs(cfg["paper"], True)
+        self.assertIs(cfg["require_stop"], True)
+        for k in ("allow_options", "allow_margin", "allow_short"):
+            self.assertIs(cfg.get(k, False), False, k)
+
+
+class Privacy(unittest.TestCase):
+    def test_working_data_is_git_ignored(self):
+        with open(os.path.join(ROOT, ".gitignore"), encoding="utf-8") as fh:
+            lines = fh.read().split()
+        self.assertIn("trader/", lines)
+        self.assertIn(".claude/settings.local.json", lines)
+
+    def test_no_secrets_or_personal_email_committed(self):
+        key = re.compile(r"(?i)(alpaca_(api|secret)_key|api[_-]?key|secret[_-]?key)\s*[\"':=]+\s*[\"']?[A-Za-z0-9]{16,}")
+        for path in every_file():
+            if not path.endswith((".md", ".py", ".json", ".txt", ".csv", ".xml")):
+                continue
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
             rel = os.path.relpath(path, ROOT)
-            if not rel.startswith(os.path.join("tests", "fixtures")):  # fixtures are real data, kept as published
-                self.assertNotIn("\u2014", text, rel)
-            self.assertNotIn("jakeschincariol" + "@" + "gmail.com", text, rel)  # built, so this file passes too
+            self.assertNotIn("jakeschincariol" + "@" + "gmail.com", text, rel)
+            self.assertIsNone(key.search(text), rel)
 
-    def test_no_v1_only_skill_is_left_behind(self):
-        for path in every_text_file():
-            rel = os.path.relpath(path, ROOT)
-            if rel.startswith("tests" + os.sep) or rel == "README.md":
-                continue  # the README points v1 users to the v1 commit
-            with open(path, encoding="utf-8", errors="replace") as fh:
-                text = fh.read()
-            for old in V1_ONLY:
-                self.assertNotIn(old, text, rel)
 
+class Compatibility(unittest.TestCase):
     def test_every_tool_runs_on_python_3_8(self):
-        # no 3.9+ only modules or syntax in the tools (the README promises 3.8)
-        for s in SKILLS:
-            folder = os.path.join(ROOT, s)
+        for s in KEPT:
+            folder = os.path.join(SKILLS_DIR, s)
             for f in os.listdir(folder):
                 if not f.endswith(".py"):
                     continue
                 with open(os.path.join(folder, f), encoding="utf-8") as fh:
                     src = fh.read()
-                for bad in ("import zoneinfo", "from zoneinfo", ".removeprefix(", ".removesuffix(",
-                            "match ", "list[", "dict[", "tuple["):
-                    if bad == "match ":
-                        self.assertNotRegex(src, r"(?m)^\s+match \w+.*:$", "%s/%s" % (s, f))
-                    elif bad.endswith("["):
-                        self.assertNotRegex(src, r"(?<![\w.])%s" % re.escape(bad), "%s/%s" % (s, f))
-                    else:
-                        self.assertNotIn(bad, src, "%s/%s" % (s, f))
-
-    def test_day_trading_limits_ship_in_the_example_config(self):
-        with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
-            cfg = json.load(fh)
-        for k in ("max_loss_per_trade_usd", "max_daily_loss_usd", "max_trades_per_day",
-                  "min_reward_risk", "require_stop", "no_entries_after", "flat_by"):
-            self.assertIn(k, cfg, k)
-        self.assertIs(cfg["require_stop"], True)
-        self.assertIs(cfg.get("allow_short", False), False)
-        self.assertIs(cfg.get("allow_margin", False), False)
-
-    def test_paper_trading_is_the_default(self):
-        with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:
-            cfg = json.load(fh)
-        self.assertIs(cfg["paper"], True)
-        self.assertIs(cfg.get("allow_options", False), False)
+                where = "%s/%s" % (s, f)
+                for bad in ("import zoneinfo", "from zoneinfo", ".removeprefix(", ".removesuffix("):
+                    self.assertNotIn(bad, src, where)
+                self.assertNotRegex(src, r"(?m)^\s+match \w+.*:$", where)
+                for gen in ("list[", "dict[", "tuple["):
+                    self.assertNotRegex(src, r"(?<![\w.])%s" % re.escape(gen), where)
 
 
 if __name__ == "__main__":

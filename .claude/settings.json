@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "disableAutoMode": "disable",
+    "allow": [],
+    "deny": [
+      "mcp__alpaca",
+      "mcp__alpaca__*",
+      "mcp__ibkr",
+      "mcp__ibkr__*",
+      "mcp__interactive-brokers",
+      "mcp__interactive-brokers__*",
+      "mcp__interactive_brokers",
+      "mcp__interactive_brokers__*",
+      "mcp__claude_ai_Interactive_Brokers",
+      "mcp__claude_ai_Interactive_Brokers__*",
+      "CronCreate",
+      "ScheduleWakeup",
+      "RemoteTrigger",
+      "Monitor",
+      "mcp__claude-code-remote__create_trigger",
+      "mcp__claude-code-remote__update_trigger",
+      "mcp__claude-code-remote__fire_trigger",
+      "mcp__claude-code-remote__send_later",
+      "Bash(uvx *)",
+      "Bash(uv tool *)",
+      "Bash(pip install *alpaca*)",
+      "Bash(pip3 install *alpaca*)",
+      "Bash(claude mcp *)",
+      "Bash(crontab *)",
+      "Bash(nohup *)",
+      "Bash(watch *)"
+    ]
+  },
+  "enableAllProjectMcpServers": false,
+  "skillOverrides": {
+    "loop": "off",
+    "trader-alerts": "user-invocable-only"
+  }
+}
