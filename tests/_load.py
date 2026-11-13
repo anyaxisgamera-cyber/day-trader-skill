@@ -5,10 +5,12 @@ import os
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIX = os.path.join(ROOT, "tests", "fixtures")
+# The retained skills are installed project-locally, where Claude Code discovers them.
+SKILLS = os.path.join(ROOT, ".claude", "skills")
 
 
 def load(folder, name):
-    path = os.path.join(ROOT, folder, name + ".py")
+    path = os.path.join(SKILLS, folder, name + ".py")
     spec = importlib.util.spec_from_file_location("trader_" + name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

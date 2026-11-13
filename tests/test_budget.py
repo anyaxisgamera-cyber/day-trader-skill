@@ -6,12 +6,13 @@ import unittest
 from contextlib import redirect_stdout, redirect_stderr
 
 from _load import load, ROOT, FIX
+from _load import SKILLS
 
 size = load("trader-budget", "size")
 
-CFG = os.path.join(ROOT, "trader-budget", "config.example.json")
+CFG = os.path.join(SKILLS, "trader-budget", "config.example.json")
 PLAN = os.path.join(FIX, "trader-budget", "plan-tsla.json")
-TARGETS = os.path.join(ROOT, "trader-budget", "targets.example.json")
+TARGETS = os.path.join(SKILLS, "trader-budget", "targets.example.json")
 TOP5 = os.path.join(FIX, "trader-budget", "berkshire-q2-2026-top5.json")
 NOW = "2026-10-19 10:15"
 TODAY = "2026-10-19"
