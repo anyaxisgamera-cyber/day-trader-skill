@@ -1,10 +1,19 @@
 # The Day Trader skill
 
-11 Claude skills for day trading: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a dollar.
+14 Claude skills for day trading India, global and crypto markets: scan thousands of charts, track breaking news, time every entry and exit, and replay every outcome before you risk a rupee.
 
 Free, MIT, no signup, no API key. The tools are plain Python that read free
-public data: Yahoo Finance charts, Nasdaq Trader's symbol lists, SEC EDGAR
-and the House Clerk.
+public data: Yahoo Finance charts, NSE's equity list, Angel One's public
+instrument list, Nasdaq Trader's symbol lists, SEC EDGAR, the House Clerk,
+and the public APIs of Binance, OKX, Coinbase, Kraken, KuCoin, Deribit,
+CoinGecko and DefiLlama.
+
+**One system, India first.** You never pick a market. RELIANCE is the NSE
+share, in rupees, on NSE's clock (9:15 to 15:30 IST, NSE's holidays, flat by
+15:10 before the broker's square-off). NIFTY29DEC2626000CE is checked against
+the exchange's real lot size and expiry. AAPL runs in New York, 7203.T in
+Tokyo, VOD.L in London, BTCUSDT around the clock, USDINR on the FX week.
+Every price says where it came from and how old it is.
 
 One scans thousands of charts for setups. Another tracks breaking news on
 every stock you watch. One watches a setup bar by bar and tells you the moment
@@ -57,10 +66,13 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
-## The eleven
+## The fourteen
 
 | command | job | what it does |
 | --- | --- | --- |
+| `/trader-markets` | Market Brain | Knows every instrument, exchange, currency, session and holiday; quotes, candles 1m to monthly, technical analysis, FX. |
+| `/trader-crypto` | Crypto Desk | Dominance, Fear & Greed, funding, open interest, liquidations, token risk, a multi-exchange scanner, liquidation-aware plans. |
+| `/trader-derivatives` | F&O Desk | NIFTY/BANKNIFTY/SENSEX/MCX contract specs, Greeks, IV, option chains, PCR, max pain, basis, rollover, payoffs. |
 | `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
 | `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
@@ -126,6 +138,17 @@ All standard-library Python. The data tools read public endpoints and are
 polite about it.
 
 ```bash
+python3 trader-markets/markets.py sync                                 # NSE list, Angel One scrip master, US list
+python3 trader-markets/markets.py resolve RELIANCE NIFTY29DEC2626000CE BTCUSDT USDINR GOLD
+python3 trader-markets/markets.py status NSE NYSE CRYPTO               # open, closed, next open
+python3 trader-markets/marketdata.py quote RELIANCE NIFTY AAPL BTCUSDT # price, source, time, freshness
+python3 trader-markets/indicators.py analyze TCS --tf 15m --tf 1d      # RSI, MACD, ATR, ADX, VWAP, levels...
+python3 trader-crypto/crypto.py overview                               # market cap, dominance, Fear & Greed, TVL
+python3 trader-crypto/crypto.py derivs BTC                             # funding, OI, long/short, liquidations
+python3 trader-crypto/crypto.py scan --top 60 --tf 1h                  # crypto setups across the top pairs
+python3 trader-derivatives/fno.py contract NIFTY29DEC2626000CE         # lot, tick, expiry, style
+python3 trader-derivatives/fno.py chain BTC                            # PCR, max pain, OI walls, IV skew
+python3 trader-scanner/scan.py universe --exchange NSE                 # NSE's EQ-series shares
 python3 trader-scanner/scan.py universe                                # ~5,900 US stocks, Nasdaq Trader
 python3 trader-scanner/scan.py daily                                   # pre-market setups, whole universe
 python3 trader-scanner/scan.py orb --at 10:15                          # opening-range breakouts so far
@@ -147,7 +170,13 @@ python3 trader-pelosi/ptr.py index --member pelosi                     # her PTR
 python3 -m unittest discover -s tests -v
 ```
 
-The tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
+The India, crypto, F&O and market tests run offline on real responses
+recorded on November 23 2026 (TCS on NSE, the Angel One scrip master, Binance,
+OKX, Coinbase, Kraken, KuCoin, Deribit, CoinGecko...). Indicator and option
+values are checked against the independent `ta` and `py_vollib` libraries,
+and every time-zone rule against the system tz database.
+
+The original tests run offline, on fixtures cut from real data: TSLA's 5-minute bars
 for the 60 days to October 19 2026, the 10:15 AM opening-range scan, Yahoo's
 TSLA headlines that morning, the House Clerk's 2026 index, real PTR text and
 real XBRL facts. They reproduce every number in the example above.
@@ -194,18 +223,39 @@ trades over $1,000 within 45 days (the STOCK Act). The Pelosi skill reads those
 public filings the minute they post.
 
 **Taxes.** Day-trading gains are short-term gains, and frequent trading makes
-wash sales likely. Nothing here is tax advice.
+wash sales likely. In India, intraday equity profit is speculative business
+income and crypto gains are taxed at 30% plus 1% TDS on sales. Nothing here is
+tax advice.
+
+**India.** Brokers square off intraday (MIS) positions themselves from about
+15:15 IST, so plans are flat by 15:10. SEBI's studies found about nine in ten
+individual F&O traders lost money. Options and futures are off unless you turn
+them on. Angel One orders are manual tickets: this pack never logs in to your
+broker and never stores a password, PIN or TOTP secret.
+
+**Crypto.** Leverage multiplies losses, and a position can be liquidated
+before its stop. Above 3x every plan warns. New tokens can be scams: check the
+listing and the contract first.
+
+**Data limits.** NSE's own website (live option chains, announcements, FII/DII
+flows) blocks automated cloud requests, MCX prices need a broker feed, and
+Binance's derivatives API is blocked from US cloud servers. Where data is
+missing the tools say so; they never fill the gap.
 
 ## Files
 
 ```
+trader-markets/     SKILL.md, markets.py, marketdata.py, indicators.py, calendars.json, build_calendars.py, nse_symbols.csv
+trader-crypto/      SKILL.md, crypto.py
+trader-derivatives/ SKILL.md, fno.py
+docs/               GLOBAL-MARKETS.md: architecture, data providers, capability matrix and test evidence
 trader-scanner/     SKILL.md, scan.py
 trader-news/        SKILL.md, news.py
 trader-entry/       SKILL.md, entry.py
 trader-exit/        SKILL.md, exit.py
 trader-timemachine/ SKILL.md, timemachine.py
 trader-risk/        SKILL.md, check.py
-trader-budget/      SKILL.md, size.py, config.example.json, targets.example.json
+trader-budget/      SKILL.md, size.py, config.example.json, config.india.example.json, targets.example.json
 trader-broker/      SKILL.md, ticket.py, claude_desktop_config.example.json
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, facts.py, metrics.example.json

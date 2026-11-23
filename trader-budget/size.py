@@ -91,6 +91,52 @@ SETUP_WORDS = {"orb": "opening-range breakout", "flag": "flag", "bounce": "overs
 class SizeError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise SizeError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time (New York, no tz files)
 
@@ -302,13 +348,16 @@ def money(x):
 
 # ---------------------------------------------------------------- plan mode (the default)
 
-def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=None):
+def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=None, fx=1.0, lot=1):
     """Pure function: one plan + your rules -> the sizing (a dict). qty may be 0.
 
     limit  the limit price for a limit order (None = market)
     price  a FRESH latest price; a market order is sized at the higher of it and the plan's entry
     cash   the cash in trader/portfolio.json, if there is one
-    today  New York date (YYYY-MM-DD); a plan for another day is refused"""
+    today  New York date (YYYY-MM-DD); a plan for another day is refused
+    fx     account-currency units per one unit of the instrument's currency (1.0 when they match):
+           every money limit is in the account currency, every price in the instrument's
+    lot    the exchange lot (NSE F&O, MCX): the quantity is a whole number of lots"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
     if not isinstance(plan, dict):
@@ -354,6 +403,9 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     risk_c = int(round((ref - stop) * 100))
     reward_c = int(round((target - ref) * 100))
     risk = risk_c / 100.0
+    fx = float(fx or 1.0)
+    lot = max(1, int(lot or 1))
+    risk_a, ref_a = risk * fx, ref * fx   # per share, in the account currency
 
     cash_buffer = round(budget * buf_pct / 100.0, 2)
     available = budget - cash_buffer
@@ -366,28 +418,35 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     limits = []
     max_loss = _f(c.get("max_loss_per_trade_usd"))
     if max_loss:
-        limits.append({"name": "max loss", "usd": max_loss, "per": risk, "shares": shares_for(max_loss, risk),
-                       "how": "%s max loss / %s risk a share" % (money(max_loss), _price(risk))})
+        limits.append({"name": "max loss", "usd": max_loss, "per": risk_a, "shares": shares_for(max_loss, risk_a),
+                       "how": "%s max loss / %s risk a share" % (money(max_loss), money(risk_a) if fx != 1 else _price(risk))})
     cap_pct = _f(c.get("max_position_pct"))
     if cap_pct:
         cap = round(budget * cap_pct / 100.0, 2)
-        limits.append({"name": "position cap", "usd": cap, "per": ref, "shares": shares_for(cap, ref),
-                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap), _price(ref))})
+        limits.append({"name": "position cap", "usd": cap, "per": ref_a, "shares": shares_for(cap, ref_a),
+                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap),
+                                                       money(ref_a) if fx != 1 else _price(ref))})
     max_order = _f(c.get("max_order_usd"))
     if max_order:
-        limits.append({"name": "max order", "usd": max_order, "per": ref, "shares": shares_for(max_order, ref),
-                       "how": "%s / %s" % (money(max_order), _price(ref))})
-    limits.append({"name": "cash", "usd": available, "per": ref, "shares": shares_for(available, ref),
-                   "how": "%s = %s / %s" % (cash_note, money(available), _price(ref))})
+        limits.append({"name": "max order", "usd": max_order, "per": ref_a, "shares": shares_for(max_order, ref_a),
+                       "how": "%s / %s" % (money(max_order), money(ref_a) if fx != 1 else _price(ref))})
+    limits.append({"name": "cash", "usd": available, "per": ref_a, "shares": shares_for(available, ref_a),
+                   "how": "%s = %s / %s" % (cash_note, money(available), money(ref_a) if fx != 1 else _price(ref))})
+    if lot > 1:
+        for l in limits:
+            l["shares"] = l["shares"] // lot * lot
 
     qty = max(0, min(l["shares"] for l in limits))
     bound = [l["name"] for l in limits if l["shares"] == qty]
     for l in limits:
         l["binds"] = l["name"] == bound[0]
-    cost = round(qty * ref, 2)
-    loss = round(qty * risk_c / 100.0, 2)
+    cost = round(qty * ref * fx, 2)
+    loss = round(qty * risk_c / 100.0 * fx, 2)
     refusal = None
-    if qty == 0:
+    if qty == 0 and lot > 1:
+        refusal = ("one lot is %d units: at %s a unit that needs %s of risk and %s of capital, over your %s limit. "
+                   "No order." % (lot, _price(ref), money(lot * risk_a), money(lot * ref_a), bound[0]))
+    elif qty == 0:
         if bound[0] == "max loss":
             refusal = ("one share risks %s (entry %s minus stop %s), more than your %s max loss per trade. "
                        "No order. Skip this trade, or plan a closer stop with trader-exit."
@@ -412,6 +471,8 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         "max_loss_per_trade_usd": max_loss, "limits": limits, "qty": qty, "bound_by": bound[0],
         "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
         "order_type": "limit" if limit is not None else "market", "refusal": refusal,
+        "fx": fx, "lot_size": lot, "market": plan.get("market") or "NYSE",
+        "currency": plan.get("currency") or "USD", "account_currency": c.get("account_currency") or "USD",
     }
 
 
@@ -429,6 +490,12 @@ def bracket_order(s):
                                              "position cap": "position cap", "max order": "max order",
                                              "cash": "cash after the buffer"}[s["bound_by"]],
               s["qty"], _price(s["risk_per_share"]), money(s["max_loss"])))
+    if s.get("market") and s["market"] != "NYSE":
+        o.update({"market": s["market"], "currency": s["currency"]})
+    if s.get("fx", 1) != 1:
+        o["fx_note"] = "%s per %s: %s" % (s["account_currency"], s["currency"], s["fx"])
+        if s.get("lot_size", 1) > 1:
+            o["lot_size"] = s["lot_size"]
     o.update({
         "order_class": "bracket",
         "take_profit_limit_price": _price(s["target"]),
@@ -438,6 +505,8 @@ def bracket_order(s):
                  "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"], "setup": s["setup"],
                  "entry_time": s["entry_time"], "flat_by": s["flat_by"]},
     })
+    if s.get("fx", 1) != 1:
+        o["plan"]["fx"] = s["fx"]
     return o
 
 
@@ -469,6 +538,12 @@ def plan_report(s, order, notes=()):
     lines.append("Size: %d shares of %s = %s at %s. Max loss at the stop: %d x %s = %s."
                  % (s["qty"], s["symbol"], money(s["cost"]), _price(s["entry"]), s["qty"],
                     _price(s["risk_per_share"]), money(s["max_loss"])))
+    if s.get("lot_size", 1) > 1:
+        lines.append("That is %d lot%s of %d." % (s["qty"] // s["lot_size"], "" if s["qty"] == s["lot_size"] else "s",
+                                                 s["lot_size"]))
+    if s.get("fx", 1) != 1:
+        lines.append("Prices are in %s, money in %s at %s %s per %s (the rate moves: re-run before you act)."
+                     % (s["currency"], s["account_currency"], "%.6g" % s["fx"], s["account_currency"], s["currency"]))
     lines.append("A stop is an order, not a promise: in a fast market it can fill below %s." % _price(s["stop"]))
     lines.append("")
     lines.append("Proposed bracket order (place_stock_order arguments, nothing has been placed):")
@@ -786,6 +861,27 @@ def run_plan(a, cfg):
                 raise SizeError("--limit wants a price, like --limit 364.00")
     sym = str((plan or {}).get("symbol") or "").upper()
     notes, price = [], None
+    acct = str(cfg.get("account_currency") or "USD").upper()
+    market, inst = use_market(sym, money=acct)
+    if market != "NYSE" and MK is not None:
+        cfg = MK.config_for(cfg, market)
+        today = to_eastern(now).date().isoformat()
+    ccy = str((plan or {}).get("currency") or inst.get("currency") or "USD").upper()
+    fx, lot = 1.0, int((plan or {}).get("lot_size") or inst.get("lot_size") or 1)
+    if ccy != acct:
+        if a.fx:
+            fx = float(a.fx)
+            notes.append("%s/%s rate %s from --fx." % (ccy, acct, a.fx))
+        elif MK is not None:
+            r = MK.load_sibling("marketdata").fx_rate(ccy, acct)
+            if r.get("rate") is None:
+                raise SizeError("the plan is in %s and your account in %s, and no FX rate could be read (%s): "
+                                "pass --fx RATE (%s per %s)" % (ccy, acct, r.get("error"), acct, ccy))
+            fx = r["rate"]
+            notes.append("%s/%s rate %s from %s (%s, as of %s UTC)." % (ccy, acct, "%.6g" % fx, r["provider"],
+                                                                     r.get("freshness"), r.get("as_of_utc")))
+        else:
+            raise SizeError("the plan is in %s and your account in %s: pass --fx RATE" % (ccy, acct))
     ppath = a.prices or ("trader/prices.json" if os.path.exists("trader/prices.json") else None)
     if ppath and limit is None and sym:
         pdoc = read_json(ppath, "prices")
@@ -804,7 +900,8 @@ def run_plan(a, cfg):
     if a.portfolio and os.path.exists(a.portfolio):
         pf = read_json(a.portfolio, "portfolio")
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
-    s = size_trade(plan, cfg, a.budget, limit, price, cash, today)
+    plan = dict(plan, market=market, currency=ccy) if market != "NYSE" else plan
+    s = size_trade(plan, dict(cfg, account_currency=acct), a.budget, limit, price, cash, today, fx, lot)
     order = bracket_order(s)
     if order and a.write:
         src = "trader/plan.json (%s %s %s)" % (s["symbol"], s["setup"] or "plan", s["date"] or today)
@@ -858,6 +955,8 @@ def main(argv=None):
     ap.add_argument("--write", nargs="?", const="trader/orders.json", metavar="PATH",
                     help="write the proposed order (default trader/orders.json)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the report")
+    ap.add_argument("--fx", type=float, help="account-currency units per one unit of the plan's currency "
+                                             "(default: read live when they differ)")
     g = ap.add_argument_group("weights mode (split a budget across a list)")
     g.add_argument("--weights", help="inline weights: AAPL=22.04,AXP=17.14")
     g.add_argument("--targets", help="a weights file: {\"weights\": [{\"ticker\", \"weight\"}]}")

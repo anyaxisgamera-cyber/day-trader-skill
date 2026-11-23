@@ -156,6 +156,15 @@ and never calls a result a sure thing. It never prints a P&L or a profit.
 It never uses a bar that has not closed yet, and never mixes today's bars
 into the pool.
 
+## Markets (one system, India first)
+
+The replay uses the plan's own exchange session: NSE replays run 9:15 to
+15:30 IST (75 five-minute bars). Yahoo's NSE 5-minute feed drops a few bars
+on most days; up to four missing bars a session are filled as flat bars at
+the previous close, and the report says how many (this slightly understates
+volatility). Exchanges with a lunch break (Tokyo, Hong Kong, Shanghai,
+Singapore) are refused: the replay needs one continuous session.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

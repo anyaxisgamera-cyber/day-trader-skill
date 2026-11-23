@@ -107,6 +107,52 @@ EARLY = datetime.time(13, 0)
 class EntryError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise EntryError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time
 
@@ -228,7 +274,7 @@ def next_open(d):
 # ---------------------------------------------------------------- Yahoo
 
 def yahoo_symbol(sym):
-    return sym.upper().replace(".", "-")
+    return market_yahoo(sym, sym.upper().replace(".", "-"))
 
 
 def chart_path(sym, rng, interval):
@@ -385,6 +431,12 @@ def read_config(path):
         for k in DEFAULTS:
             if doc.get(k):
                 cfg[k] = doc[k]
+        if MK is not None and MARKET != "NYSE":
+            mc = MK.config_for(doc, MARKET)
+            cfg = {k: mc.get(k, cfg[k]) for k in DEFAULTS}
+    elif MK is not None and MARKET != "NYSE":
+        mc = MK.config_for({}, MARKET)
+        cfg = {k: mc.get(k, cfg[k]) for k in DEFAULTS}
     for k in DEFAULTS:
         parse_hhmm(cfg[k], k)
     return cfg
@@ -475,7 +527,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     res["bars_closed"] = len(bars)
 
     if local < open_dt:
-        res.update(phase="pre-open", reason="the NYSE opens at 9:30%s" % (
+        res.update(phase="pre-open", reason="the NYSE opens at %s%s" % (short(open_dt),
             " and the %d-minute range is set at %s" % (or_minutes, short(or_end)) if setup == "orb" else ""))
         return res
 
@@ -805,6 +857,7 @@ def _load(a, sym, now):
 
 
 def cmd_check(a):
+    use_market(a.symbol)
     cfg = read_config(a.config)
     opts = _opts(a, cfg)
     sym = a.symbol.upper()
@@ -823,6 +876,7 @@ def cmd_check(a):
 
 
 def cmd_watch(a):
+    use_market(a.symbol)
     cfg = read_config(a.config)
     opts = _opts(a, cfg)
     sym = a.symbol.upper()
@@ -877,7 +931,8 @@ def cmd_watchlist(a):
     rows = []
     for i, h in enumerate(hits):
         sym = str(h["symbol"]).upper()
-        o = dict(opts)
+        use_market(sym)
+        o = dict(opts, cfg=read_config(a.config))
         if a.setup == "level" and o["level"] is None:
             o["level"] = h.get("level")
         try:

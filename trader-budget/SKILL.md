@@ -154,6 +154,15 @@ It never places, approves or schedules an order, never raises a limit on its
 own, never shrinks a stop to fit more shares, and never sizes options,
 margin or short positions.
 
+## Markets (one system, India first)
+
+Sizing follows the plan's market and currency. Set `"account_currency": "INR"`
+for an Indian account (see `config.india.example.json`); every money limit is
+then in rupees. When the plan's currency differs from the account's, the live
+rate is read (Yahoo, then the ECB via Frankfurter) or taken from `--fx`, and
+the report states it. F&O and MCX quantities are whole lots from the scrip
+master.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

@@ -160,6 +160,16 @@ It never places an order, never edits an order to make it pass, never
 loosens a limit, never blocks a sell that only gets the user out, and never
 treats a PASS as the user's yes.
 
+## Markets (one system, India first)
+
+Each order is checked on its own exchange's clock: NSE's holidays, 9:15 to
+15:30 IST, no entries after 15:00 by default. Money limits are in
+`"account_currency"` (default USD; set "INR" for an Indian account): the
+`_usd` key names are historical. An order in another currency is converted
+with the rate trader-budget recorded. On NSE it also blocks trade-for-trade
+(BE/BZ) shares, quantities that are not whole lots, and futures unless
+`"allow_futures": true`. Crypto and Forex orders are out of scope.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

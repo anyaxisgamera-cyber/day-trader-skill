@@ -97,6 +97,16 @@ ticker has no news, say so rather than padding the brief.
 - Never hammers a server: one request per feed per ticker, a pause between
   calls, and SEC's 10 requests a second limit stays far away.
 
+## Markets (one system, India first)
+
+NSE and BSE tickers (RELIANCE, TCS.NS) get Yahoo headlines and their move
+against the previous NSE close, shown in IST when the whole watchlist is
+Indian. SEC 8-Ks exist only for US registrants, so they are skipped for
+other markets. NSE/BSE corporate announcements are not read: NSE blocks
+automated cloud requests. Point the user to nseindia.com > Companies >
+Corporate Filings for those. For crypto market news, combine trader-crypto
+`overview` and `derivs` with the headlines of a related stock.
+
 ## Safety
 
 Education and tooling, not financial advice. This skill only reads and

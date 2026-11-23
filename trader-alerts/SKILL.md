@@ -148,6 +148,13 @@ watched; with `add --opening-bell`, the bell rings at 9:30.
 It never places, cancels or changes an order, never claims a quote is
 live, and never predicts where a price is going.
 
+## Markets (one system, India first)
+
+`alerts.py clock NSE RELIANCE 7203.T` shows any market's status. Rules are
+checked on their symbol's exchange: a TCS stop and a 15:10 flat-by alert ring
+on NSE's clock in IST, an AAPL one on New York's. Quotes print in the
+instrument's currency. Stooq quotes are US-only.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

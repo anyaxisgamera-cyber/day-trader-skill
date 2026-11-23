@@ -96,6 +96,52 @@ EARLY = datetime.time(13, 0)
 class PlanError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise PlanError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time
 
@@ -391,11 +437,13 @@ def read_text(path):
 
 
 def load_chart(sym, interval, day, offline=None):
-    ysym = sym.upper().replace(".", "-")
+    ysym = market_yahoo(sym, sym.upper().replace(".", "-"))
     if offline:
         path = offline
         if os.path.isdir(offline):
             path = os.path.join(offline, ysym + ".json")
+        if not os.path.exists(path) and os.path.exists(os.path.join(offline, sym.upper() + ".json")):
+            path = os.path.join(offline, sym.upper() + ".json")
             if not os.path.exists(path):
                 path += ".gz"
         if not os.path.exists(path):
@@ -499,6 +547,12 @@ def read_config(path):
         for k in DEFAULTS:
             if doc.get(k) is not None:
                 cfg[k] = doc[k]
+        if MK is not None and MARKET != "NYSE":
+            mc = MK.config_for(doc, MARKET)
+            cfg = {k: mc.get(k, cfg[k]) for k in DEFAULTS}
+    elif MK is not None and MARKET != "NYSE":
+        mc = MK.config_for({}, MARKET)
+        cfg = {k: mc.get(k, cfg[k]) for k in DEFAULTS}
     return cfg
 
 
@@ -562,8 +616,25 @@ def gather(a):
     return info
 
 
+def to_tick(c, tick):
+    """Exchange tick sizes above a cent (NSE 0.05 / 0.10, MCX 1.00): the stop goes
+    down to the tick, away from the entry; the target to the nearest tick."""
+    t = D(tick)
+    if t <= CENT:
+        return c, None
+    stop = (c["stop"] / t).to_integral_value(rounding=ROUND_FLOOR) * t
+    target = (c["target"] / t).to_integral_value(rounding=ROUND_HALF_UP) * t
+    if target <= c["entry"]:
+        target += t
+    risk = c["entry"] - stop
+    c = dict(c, stop=stop, target=target, risk=risk, reward_risk=((target - c["entry"]) / risk).quantize(
+        CENT, rounding=ROUND_HALF_UP))
+    return c, "stop and target moved to the exchange tick of %s" % num(t)
+
+
 def build_plan(a, now_utc):
     info = gather(a)
+    market, inst = use_market(info["symbol"])
     cfg = read_config(a.config)
     stop_text = a.stop
     if not stop_text:
@@ -592,6 +663,11 @@ def build_plan(a, now_utc):
         atr, atr_n = atr_of(bars)
     c = compute(info["entry"], stop_rule, stop_param, target_rule, target_param, info["or_high"], info["or_low"],
                 atr, atr_n)
+    if market != "NYSE" and c.get("stop_detail"):
+        c["stop_detail"] = c["stop_detail"].replace("$", (inst.get("currency") or "") + " ")
+    tick_note = None
+    if inst.get("tick_size"):
+        c, tick_note = to_tick(c, inst["tick_size"])
     flat_by, flat_note = resolve_flat_by(day, a.flat_by, cfg, entry_time)
     orr = None
     if info["or_high"] is not None and info["or_low"] is not None:
@@ -605,12 +681,23 @@ def build_plan(a, now_utc):
             "target": float(c["target"]), "target_r": float(c["target_r"]), "target_label": c["target_label"],
             "risk_per_share": float(c["risk"]), "reward_risk": float(c["reward_risk"]), "flat_by": flat_by,
             "stop_detail": c["stop_detail"], "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"), "note": NOTE}
+    if MK is not None:
+        plan.update(market=market, currency=inst.get("currency") or "USD", yahoo=inst.get("yahoo"))
+        if inst.get("tick_size"):
+            plan["tick_size"] = inst["tick_size"]
+        if inst.get("lot_size") and inst.get("lot_size") > 1:
+            plan["lot_size"] = inst["lot_size"]
     if atr is not None:
         plan["atr"] = round(atr, 4)
         plan["atr_bars"] = atr_n
     warnings = []
     if flat_note:
         warnings.append("Flat-by %s: %s." % (flat_by, flat_note))
+    if tick_note:
+        warnings.append(tick_note[0].upper() + tick_note[1:] + ".")
+    if market in ("NSE", "BSE"):
+        warnings.append("India: intraday (MIS) positions are squared off by the broker from about 15:15-15:20 IST; "
+                        "flat by %s keeps you ahead of that." % flat_by)
     mrr = cfg.get("min_reward_risk")
     try:
         if mrr is not None and c["reward_risk"] < D(mrr):

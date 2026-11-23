@@ -132,6 +132,15 @@ is `/trader-exit`), never moves the level after the fact, and never counts a
 bar that has not closed. It never runs `/trader-broker` from a background
 watch: nobody is there to say yes.
 
+## Markets (one system, India first)
+
+With the trader-markets skill installed next to this one, `entry.py check
+RELIANCE` runs on NSE: bars in IST, the opening range from 9:15, NSE's
+holidays, no entries after 15:00 (config `markets.NSE` overrides), prices in
+rupees. 7203.T runs on Tokyo, VOD.L on London, AAPL on New York. Crypto and
+Forex trade around the clock, so there is no opening range: use trader-crypto
+for crypto.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

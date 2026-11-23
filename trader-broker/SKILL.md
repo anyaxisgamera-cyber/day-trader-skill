@@ -200,6 +200,21 @@ buttons: Allow once, Deny. Allow once sends it to the paper account. The
 - Never calls `close_all_positions`, `cancel_all_orders`, option or crypto order tools on its own.
 - Never promises a fill price: a market order and a stop fill at whatever the market gives.
 
+## Markets (one system, India first)
+
+Orders on NSE, BSE, NFO, BFO, MCX or CDS become Angel One manual tickets
+(`"broker": "angelone"`): the legs to enter in the Angel One app (entry,
+then stop-loss and target after the fill, not linked to each other) and the
+exact SmartAPI placeOrder fields with the real symbol token from the scrip
+master. Nothing is sent: this pack never logs in to Angel One, never stores
+a password, PIN or TOTP secret, and never says an order was placed until the
+user reports the Angel One order id (`ticket.py result`). With
+`"paper": true` the ticket says not to place it at all.
+
+A future SmartAPI integration belongs on the user's own computer: their
+SmartAPI client logs in there with their own credentials and places only
+the ticket the user approved here. It must never run unattended.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

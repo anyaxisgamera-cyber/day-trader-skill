@@ -91,6 +91,52 @@ KEYWORDS = [
 class NewsError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise NewsError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time
 
@@ -192,7 +238,14 @@ class Fetcher(object):
 
 
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    return market_yahoo(ticker, ticker.upper().replace(".", "-"))
+
+
+def us_listed(ticker):
+    """SEC filings exist only for US registrants: an NSE/BSE/LSE... share has none."""
+    if MK is None:
+        return True
+    return MK.market_of(ticker, MK.Lookups())[0] in ("NYSE", "NASDAQ")
 
 
 def cik_map(fetcher, state):
@@ -383,6 +436,7 @@ def collect(fetcher, watch, state, sec=True, forms=("8-K",), count=10, errors=No
     items = []
     for t in sorted(watch):
         try:
+            # region=US on purpose: Yahoo's region=IN feed comes back empty for NSE symbols (checked 2026-11-23)
             items += parse_rss(fetcher.get(YAHOO % yahoo_symbol(t), "yahoo-%s.xml" % t), t)
         except NewsError as exc:
             errors.append("headlines for %s: %s" % (t, exc))
@@ -393,6 +447,8 @@ def collect(fetcher, watch, state, sec=True, forms=("8-K",), count=10, errors=No
             errors.append("SEC ticker list: %s" % exc)
             ciks = {}
         for t in sorted(watch):
+            if not us_listed(t):
+                continue  # not a US registrant: no 8-Ks (exchange announcements: see SKILL.md)
             cik = ciks.get(t)
             if not cik:
                 if ciks:
@@ -505,6 +561,12 @@ def main(argv=None):
         watch.update({t: known[t] for t in watch if known.get(t)})
     else:
         watch = watch_from_files(args.portfolio, args.watchlist, args.plan)
+    if MK is not None and watch:
+        lk_ = MK.Lookups()
+        mkts = {MK.market_of(t, lk_)[0] for t in watch}
+        mkts = {{"NASDAQ": "NYSE", "NFO": "NSE", "BFO": "BSE"}.get(m, m) for m in mkts}
+        if len(mkts) == 1 and list(mkts)[0] not in ("NYSE", "CRYPTO", "FX", "CME"):
+            use_market(sorted(watch)[0])  # one non-US market: show its own clock
     if not watch:
         print("news: no tickers. Pass --tickers, or run /trader-scanner first (it writes "
               "trader/watchlist.json).", file=sys.stderr)

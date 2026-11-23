@@ -127,6 +127,52 @@ EARLY = datetime.time(13, 0)
 class RiskError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise RiskError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time (New York, no tz files)
 
@@ -479,6 +525,31 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                "(\"allow_options\": false)" % sym)
             else:
                 warns.append("option order: options can lose 100%% of what you pay")
+        elif sym and MK is not None and MARKET != "NYSE":
+            inst = MK.resolve(sym, MK.Lookups())
+            kind_ = inst.get("asset_class")
+            if kind_ == "option":
+                if not c.get("allow_options"):
+                    reasons.append("asset: %s is an option contract; options are off (\"allow_options\": false)"
+                                   % sym)
+                else:
+                    warns.append("option order: options can lose 100%% of what you pay")
+            elif kind_ in ("future", "commodity"):
+                if not c.get("allow_futures"):
+                    reasons.append("asset: %s is a futures contract; futures are off (\"allow_futures\": false). "
+                                   "Futures are leveraged: a lot can lose more than its margin." % sym)
+            elif kind_ not in ("equity", "index"):
+                reasons.append("asset: %s is %s; this pack day-trades exchange-listed stocks and ETFs only"
+                               % (sym, kind_ or "not a recognised instrument"))
+            elif not inst.get("verified"):
+                warns.append("%s is not on the %s symbol list this machine has: check the ticker" % (sym, MARKET))
+            if inst.get("series") in ("BE", "BZ"):
+                reasons.append("asset: %s trades in NSE's %s (trade-for-trade) series: delivery only, no "
+                               "intraday" % (sym, inst["series"]))
+            lot_ = int(o.get("lot_size") or inst.get("lot_size") or 1)
+            if lot_ > 1 and _f(qty) and int(round(_f(qty))) % lot_:
+                reasons.append("format: %s trades in lots of %d; qty %s is not a whole number of lots"
+                               % (sym, lot_, qty))
         elif sym and ("/" in sym or not TICKER.match(sym)):
             reasons.append("asset: %s does not look like a US stock or ETF ticker; "
                            "this pack trades stocks and ETFs only" % sym)
@@ -505,11 +576,12 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             warns.append("the %s price in trader/prices.json is older than %d minutes: not used"
                          % (sym, FRESH_MINUTES))
         q = _f(qty)
+        fxr = _f(plan.get("fx")) or 1.0   # account-currency units per instrument-currency unit
         if notional is not None and _f(notional):
             value = _f(notional)
         elif q:
             if ref:
-                value = q * ref
+                value = q * ref * fxr
 
         # entry or exit
         held = acct["shares"].get(sym, 0.0)
@@ -594,7 +666,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                     risk_c = int(round(abs(ref - stop) * 100))
                     risk_ps = risk_c / 100.0
                     shares = q if q is not None else ((value or 0) / ref)
-                    max_loss = round(shares * risk_ps, 2)
+                    max_loss = round(shares * risk_ps * fxr, 2)
                     cap = _f(c.get("max_loss_per_trade_usd"))
                     if cap and max_loss > cap + CENT:
                         later.append("loss: %s shares x %s risk a share = %s at the stop, over your %s max loss "
@@ -765,6 +837,38 @@ def load_prices(pdoc):
     return out, times
 
 
+def check_by_market(orders, cfg, portfolio, prices, state, today, now, times):
+    """Each market's orders are checked on that market's own clock and windows.
+    One market (the usual case) is exactly check()."""
+    groups = {}
+    for o in orders:
+        m = str(o.get("market") or "").upper()
+        if not m and MK is not None and o.get("symbol"):
+            m = MK.market_of(str(o["symbol"]), MK.Lookups())[0]
+        groups.setdefault(m if m and m != "NASDAQ" else "NYSE", []).append(o)
+    acct = str(cfg.get("account_currency") or "USD").upper()
+    merged = None
+    for m, group in groups.items():
+        if MK is not None:
+            use_market(str(group[0].get("symbol")), money=acct)
+            c = MK.config_for(cfg, MARKET) if MARKET != "NYSE" else cfg
+        else:
+            c = cfg
+        r = check(group, c, portfolio, prices, state, today if MARKET == "NYSE" else None, now, times)
+        if merged is None:
+            merged = r
+        else:
+            merged["results"] += r["results"]
+            merged["pass"] += r["pass"]
+            merged["block"] += r["block"]
+            merged["warnings"] = list(merged.get("warnings", [])) + list(r.get("warnings", []))
+    if len(groups) > 1:
+        merged.setdefault("warnings", []).append("orders on %d markets (%s): each was checked on its own clock; "
+                                                 "trades-per-day and daily-loss counts are per market here"
+                                                 % (len(groups), ", ".join(sorted(groups))))
+    return merged
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Check proposed orders against your limits (trader-risk).")
     ap.add_argument("--orders", default="trader/orders.json")
@@ -780,7 +884,6 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     try:
-        now = parse_now(a.now)
         if a.today and not re.match(r"^\d{4}-\d{2}-\d{2}$", a.today):
             raise RiskError("--today wants a date like 2026-10-19")
         doc = read_json(a.orders, "orders file (run trader-budget first)")
@@ -788,11 +891,14 @@ def main(argv=None):
         if not isinstance(orders, list) or not orders:
             raise RiskError("no orders in %s" % a.orders)
         cfg = read_json(a.config, "config", required=False) or {}
+        first = next((o for o in orders if isinstance(o, dict) and o.get("symbol")), {})
+        use_market(str(first.get("symbol") or ""), money=str(cfg.get("account_currency") or "USD").upper())
+        now = parse_now(a.now)  # --now is a time on the orders' own market clock
         portfolio = read_json(a.portfolio, "portfolio", required=False)
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
-        res = check(orders, cfg, portfolio, prices, state, a.today, now, times)
+        res = check_by_market(orders, cfg, portfolio, prices, state, a.today, now, times)
         if pdoc.get("as_of"):
             res["prices_as_of"] = pdoc["as_of"]
         if not a.no_write:

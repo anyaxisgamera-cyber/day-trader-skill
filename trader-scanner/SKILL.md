@@ -191,6 +191,18 @@ oversold bounce).
 It never places, sizes or checks an order, never says which stock to buy,
 never calls data real time, and never promises that a setup works.
 
+## Markets (one system, India first)
+
+With the trader-markets skill installed next to this one, a scan runs on the
+symbols' own exchange: NSE shares open at 9:15 IST, so the 15-minute opening
+range is 9:15 to 9:30, and the scan uses NSE's holidays. Build an NSE
+universe with `scan.py universe --exchange NSE --out trader/universe-nse.txt`
+(NSE's EQ series only: BE/BZ shares are delivery-only). When the user does
+not name a market, scan NSE first. A scan runs on one exchange at a time; on
+NSE the liquidity floor defaults to Rs 50 and 100,000 shares. Bare tickers in a
+universe file are read as US (that is the list `universe` always built); NSE
+files carry `.NS`. For crypto use trader-crypto `scan`.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.

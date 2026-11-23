@@ -467,6 +467,32 @@ def ticker_ciks(fetcher):
     return out
 
 
+NON_US_RESULTS = {
+    "NSE": "Indian listed companies file quarterly results with NSE and BSE under SEBI's LODR rules (nseindia.com, "
+           "Companies > Corporate Filings > Financial Results; bseindia.com > Corporate Announcements). NSE blocks "
+           "automated cloud requests, so this tool cannot read them: open the results PDF and paste the numbers, "
+           "and Claude can do the same quarter-on-quarter and year-on-year arithmetic.",
+}
+
+
+def _listed_outside_us(ticker):
+    """(exchange, where its results are filed) when the shared market brain places the ticker abroad."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(os.environ.get("TRADER_MARKETS_DIR") or os.path.join(here, "..", "trader-markets"), "markets.py")
+    if not os.path.exists(path):
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("trader_markets_brain_an", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    inst = mod.resolve(ticker, mod.Lookups())
+    ex = inst.get("exchange")
+    if not ex or ex in ("NYSE", "NASDAQ") or inst.get("asset_class") != "equity":
+        return None
+    return ex, NON_US_RESULTS.get("NSE" if ex in ("NSE", "BSE") else ex,
+                                  "Its results are filed with that exchange's regulator, which this tool does not read.")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("tickers", nargs="*", help="tickers, e.g. AAPL KO")
@@ -501,8 +527,13 @@ def main(argv=None):
         else:
             cik, name = ciks.get(tick.replace("-", "."), (None, None))
         if not cik:
-            print("facts: no SEC CIK for %s (is it a US filer? ETFs and foreign filers "
-                  "may not have XBRL facts)" % tick, file=sys.stderr)
+            where = _listed_outside_us(tick)
+            if where:
+                print("facts: %s is listed on %s, not with the SEC, so EDGAR has no filings for it. %s"
+                      % (tick, where[0], where[1]), file=sys.stderr)
+            else:
+                print("facts: no SEC CIK for %s (is it a US filer? ETFs and foreign filers "
+                      "may not have XBRL facts)" % tick, file=sys.stderr)
             failed += 1
             continue
         try:

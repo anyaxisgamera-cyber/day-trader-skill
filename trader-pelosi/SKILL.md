@@ -141,6 +141,13 @@ does not click it or automate it. The route:
 - Never places an order, and never copies options trades.
 - Never automates the Senate agreement or any login.
 
+## Markets (one system, India first)
+
+This skill reads US House disclosures only (the STOCK Act is a US law). For
+Indian insider and promoter trades, the source is the SEBI insider-trading
+(PIT) disclosures published on NSE and BSE, which NSE does not serve to
+automated cloud requests.
+
 ## Safety
 
 - Education and tooling, not financial advice. Nothing in this pack is a

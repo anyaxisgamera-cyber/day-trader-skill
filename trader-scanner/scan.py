@@ -69,6 +69,8 @@ Exit code 0 when the scan found something, 1 when it did not or could not run.
 """
 
 import argparse
+import csv
+import io
 import datetime
 import gzip
 import json
@@ -137,6 +139,52 @@ LABEL = dict(SETUPS)
 
 class ScanError(Exception):
     pass
+
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise ScanError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
 
 
 # ---------------------------------------------------------------- time
@@ -268,7 +316,9 @@ def yahoo_get(path):
 
 
 def to_yahoo(sym):
-    return sym.upper().replace(".", "-")
+    if MARKET == "NYSE":
+        return sym.upper().replace(".", "-")
+    return market_yahoo(sym, sym.upper().replace(".", "-"))
 
 
 def spark_path(symbols, rng, interval):
@@ -671,9 +721,10 @@ def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
             raise ScanError("The market closed at %s ET on %s. Replay the session with --at 10:15."
                             % (clock_label(close_dt), day_label(day)))
     if cutoff < first_close:
-        raise ScanError("It is %s ET: the %d-minute opening range runs 9:30 to %s and the first bar after it "
+        raise ScanError("It is %s ET: the %d-minute opening range runs %s to %s and the first bar after it "
                         "closes at %s. Run orb again after %s."
-                        % (clock_label(cutoff), or_minutes, clock_label(range_end), clock_label(first_close),
+                        % (clock_label(cutoff), or_minutes, clock_label(slot(day, 0)), clock_label(range_end),
+                           clock_label(first_close),
                            clock_label(first_close)))
     if until is not None and cutoff.time() > until:
         raise ScanError("It is %s ET, after %s, your last time for new entries (no_entries_after): an "
@@ -768,6 +819,31 @@ def fetch_spark(symbols, rng, interval, pause, a=None):
     return data, failed
 
 
+def _scan_market(a, symbols, continuous=False):
+    """Every symbol in one scan must trade on the same exchange session."""
+    if MK is None or not symbols:
+        return MARKET
+    suffixed = [x for x in symbols if "." in x and "." + x.rsplit(".", 1)[1] in MK.YAHOO_SUFFIX]
+    if not a.symbols and not suffixed:
+        return MARKET   # a universe or watchlist of bare tickers is the US list this scanner always built
+    lk = MK.Lookups()
+    codes = {}
+    for sym in symbols[:400]:
+        code = MK.market_of(sym, lk)[0]
+        code = {"NASDAQ": "NYSE", "NFO": "NSE", "BFO": "BSE"}.get(code, code)
+        codes.setdefault(code, sym)
+    if len(codes) > 1:
+        raise ScanError("this list mixes markets (%s): a scan runs on one exchange's clock. Scan each market "
+                        "separately (for example --universe trader/universe-nse.txt)"
+                        % ", ".join("%s like %s" % kv for kv in sorted(codes.items())))
+    code = list(codes)[0]
+    use_market(codes[code], continuous=continuous)
+    if code in ("NSE", "BSE") and a.min_price == 5.0 and a.min_volume in (1000000, 0):
+        a.min_price = INDIA_LIQUIDITY[0]
+        a.min_volume = INDIA_LIQUIDITY[1] if a.min_volume else 0
+    return MARKET
+
+
 def read_symbols(a, offline_syms=None):
     if a.symbols:
         syms = [s for s in re.split(r"[,\s]+", a.symbols.upper()) if s]
@@ -837,7 +913,59 @@ def money(x):
 
 # ---------------------------------------------------------------- commands
 
+NSE_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+INDIA_LIQUIDITY = (50.0, 100000)   # INR price and shares a day: the US defaults ($5, 1M shares) do not fit
+
+
+def nse_universe(text):
+    """NSE's equity list -> [(SYM.NS, name)], series EQ only: BE/BZ shares are
+    trade-for-trade (delivery only), so they cannot be day traded."""
+    kept, counts = [], {"rows": 0, "keep": 0, "not EQ series": 0}
+    for row in csv.reader(io.StringIO(text)):
+        if len(row) < 3 or row[0].strip() == "SYMBOL":
+            continue
+        counts["rows"] += 1
+        if row[2].strip() != "EQ":
+            counts["not EQ series"] += 1
+            continue
+        kept.append((row[0].strip().upper() + ".NS", row[1].strip()))
+    counts["keep"] = len(kept)
+    return kept, counts
+
+
+def cmd_universe_nse(a):
+    if a.offline:
+        p = os.path.join(a.offline, "EQUITY_L.csv") if os.path.isdir(a.offline) else a.offline
+        with open(p, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    else:
+        try:
+            text = MK._get(NSE_LIST_URL).decode("utf-8", "replace") if MK is not None else http_get(NSE_LIST_URL, 60)
+        except (urllib.error.URLError, OSError) as e:
+            raise ScanError("could not read NSE's equity list (%s): %s" % (NSE_LIST_URL, getattr(e, "reason", e)))
+    kept, counts = nse_universe(text)
+    if not a.no_write:
+        d = os.path.dirname(a.out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(a.out, "w", encoding="utf-8") as fh:
+            for sym, name in kept:
+                fh.write("%s|%s\n" % (sym, name))
+    if a.json:
+        print(json.dumps({"exchange": "NSE", "count": len(kept), "counts": counts,
+                          "out": None if a.no_write else a.out}, indent=2))
+    else:
+        print("NSE equity list (%s): %s rows." % (NSE_LIST_URL, "{:,}".format(counts["rows"])))
+        print("Kept %s shares in the EQ series (intraday allowed); dropped %s trade-for-trade (BE/BZ) shares."
+              % ("{:,}".format(len(kept)), "{:,}".format(counts["not EQ series"])))
+        if not a.no_write:
+            print("Wrote %s (one SYMBOL.NS|Name a line)." % a.out)
+    return 0 if kept else 1
+
+
 def cmd_universe(a):
+    if getattr(a, "exchange", "US") == "NSE":
+        return cmd_universe_nse(a)
     t0 = time.time()
     texts = {}
     for k, fname in enumerate(NASDAQ_FILES):
@@ -888,6 +1016,7 @@ def cmd_daily(a):
         data, failed = load_offline(a.offline)
         offline_syms = sorted(set(data) | set(failed))
     symbols = read_symbols(a, offline_syms)
+    market = _scan_market(a, symbols)
     if not a.offline:
         progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
@@ -957,8 +1086,15 @@ def cmd_orb(a):
                 explicit_day = max(days)
                 if at is None:
                     raise ScanError("offline replay: give --at HH:MM or --now \"YYYY-MM-DD HH:MM\"")
-    day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     symbols = read_symbols(a, offline_syms)
+    market = _scan_market(a, symbols, continuous=True)
+    if market != "NYSE":
+        now = parse_now(a.now)
+        cfg = read_config(a.config)
+        if MK is not None:
+            cfg = MK.config_for(cfg, market)
+        until = parse_hhmm(a.until or cfg.get("no_entries_after") or "15:30", "--until")
+    day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     confirm = None
     if not a.offline:
         today = to_eastern(parse_now(None)).date()
@@ -995,8 +1131,9 @@ def cmd_orb(a):
     if a.json:
         print(json.dumps(dict(doc, counts=counts, seconds=round(time.time() - t0, 1)), indent=2))
         return 0 if hits else 1
-    print("Opening-range breakout scan, %s %s ET: %d-minute range (9:30 to %s), 5-minute bars, Yahoo."
-          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, a.or_minutes // BAR_MIN))))
+    print("Opening-range breakout scan, %s %s ET: %d-minute range (%s to %s), 5-minute bars, Yahoo."
+          % (day_label(day), clock_label(cutoff), a.or_minutes, clock_label(slot(day, 0)),
+             clock_label(slot(day, a.or_minutes // BAR_MIN))))
     print("Fetched %s of %s charts%s; %s usable%s; %s candidates, %s confirmed with real highs and lows."
           % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
              (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
@@ -1031,7 +1168,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Chart Scanner (trader-scanner): daily setups and opening-range breakouts.")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("universe", help="download Nasdaq Trader's lists -> trader/universe.txt")
+    p = sub.add_parser("universe", help="download the symbol list: US (Nasdaq Trader) or NSE")
+    p.add_argument("--exchange", default="US", choices=["US", "NSE"],
+                   help="US: Nasdaq Trader's directories; NSE: NSE's equity list (EQ series)")
     p.add_argument("--out", default=DEFAULT_UNIVERSE)
     p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt")
     p.add_argument("--no-write", action="store_true")

@@ -116,6 +116,13 @@ so the summary read that 10-Q directly.
 - Never calls SEC without the User-Agent, and stays well under 10 requests a
   second.
 
+## Markets (one system, India first)
+
+SEC filings exist for US registrants only. For an NSE or BSE company the tool
+says so and points to its results on NSE/BSE (SEBI LODR filings), which NSE
+does not serve to automated cloud requests: the user can paste the numbers,
+and the same quarter-on-quarter and year-on-year arithmetic applies.
+
 ## Safety
 
 Education and tooling, not financial advice. This skill only reads filings.

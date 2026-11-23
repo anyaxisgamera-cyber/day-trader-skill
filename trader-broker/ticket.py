@@ -58,6 +58,52 @@ DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "m
 class TicketError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise TicketError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time (New York, no tz files)
 
@@ -349,9 +395,67 @@ def kind_of(order, rv):
 
 # ---------------------------------------------------------------- rendering
 
+INDIA = ("NSE", "BSE", "NFO", "BFO", "MCX", "CDS")
+
+
+def broker_for(order, cfg):
+    """alpaca, ibkr, or angelone (manual tickets) for an order on an Indian market."""
+    b = str(cfg.get("broker", "alpaca")).lower()
+    m = str(order.get("market") or "").upper()
+    if m in INDIA and b not in ("angelone", "manual"):
+        return "angelone"
+    return b
+
+
+def angel_legs(order):
+    """Angel One SmartAPI placeOrder fields for each leg, for you to enter by hand.
+
+    Nothing here logs in or sends anything. Leg 1 is the entry; legs 2 and 3
+    are placed only after leg 1 fills, and they are NOT linked: when one fills,
+    cancel the other yourself (or use a GTT/OCO if your account offers it)."""
+    sym = str(order.get("symbol", "")).upper()
+    inst = MK.resolve(sym, MK.Lookups()) if MK is not None else {}
+    lk = MK.Lookups() if MK is not None else None
+    if inst.get("exchange") in ("NSE", "BSE") and lk is not None and "scrip.csv" in lk.loaded and not inst.get("token"):
+        sc = lk.equity_scrip(inst.get("symbol") or sym, inst["exchange"])
+        if sc:
+            inst.update(angel_symbol=sc["symbol"], token=sc["token"])
+    exch = inst.get("exchange") or str(order.get("market") or "NSE")
+    tsym = inst.get("angel_symbol") or ((inst.get("symbol") or sym.split(".")[0]) + ("-EQ" if exch == "NSE" else ""))
+    token = inst.get("token") or "LOOK UP (markets.py sync, then markets.py resolve %s)" % sym
+    fno = inst.get("asset_class") in ("option", "future") or exch in ("NFO", "BFO", "MCX", "CDS")
+    product = "CARRYFORWARD" if fno and order.get("carry") else "INTRADAY"
+    base = {"tradingsymbol": tsym, "symboltoken": str(token), "exchange": exch, "producttype": product,
+            "duration": "DAY", "quantity": str(order.get("qty"))}
+    side = str(order.get("side", "buy")).upper()
+    typ = str(order.get("type", "market")).lower()
+    legs = [dict(base, variety="NORMAL", transactiontype=side, ordertype="LIMIT" if typ == "limit" else "MARKET",
+                 price=str(order.get("limit_price") or "0"), _leg="1 entry")]
+    if order.get("stop_loss_stop_price"):
+        trig = float(order["stop_loss_stop_price"])
+        exit_side = "SELL" if side == "BUY" else "BUY"
+        if fno:
+            tick = float(inst.get("tick_size") or 0.05)
+            lim = trig - max(5 * tick, round(trig * 0.005 / tick) * tick) if exit_side == "SELL" else \
+                trig + max(5 * tick, round(trig * 0.005 / tick) * tick)
+            legs.append(dict(base, variety="STOPLOSS", transactiontype=exit_side, ordertype="STOPLOSS_LIMIT",
+                             triggerprice="%.2f" % trig, price="%.2f" % lim,
+                             _leg="2 stop-loss (after leg 1 fills; stop-limit because many brokers refuse SL-M in "
+                                  "F&O: in a gap it may not fill)"))
+        else:
+            legs.append(dict(base, variety="STOPLOSS", transactiontype=exit_side, ordertype="STOPLOSS_MARKET",
+                             triggerprice="%.2f" % trig, price="0", _leg="2 stop-loss (after leg 1 fills)"))
+    if order.get("take_profit_limit_price"):
+        legs.append(dict(base, variety="NORMAL", transactiontype="SELL" if side == "BUY" else "BUY", ordertype="LIMIT",
+                         price=str(order["take_profit_limit_price"]), _leg="3 target (after leg 1 fills)"))
+    return legs, inst
+
+
 def render(order, idx, total, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
-    broker = str(cfg.get("broker", "alpaca")).lower()
+    broker = broker_for(order, cfg)
+    if broker in ("angelone", "manual"):
+        return render_manual(order, idx, total, cfg, label, rv, ready, broker)
     paper = cfg.get("paper", True)
     acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
     lines = ["ORDER %d of %d, %s, %s" % (idx, total, acct, "Interactive Brokers" if broker == "ibkr" else "Alpaca")]
@@ -379,9 +483,53 @@ def render(order, idx, total, cfg, risk, state, today):
     return "\n".join(lines), ready
 
 
+def render_manual(order, idx, total, cfg, label, rv, ready, broker):
+    paper = cfg.get("paper", True)
+    legs, inst = angel_legs(order)
+    acct = "PAPER (record only: do not place it)" if paper else "LIVE: you place it yourself in Angel One"
+    lines = ["ORDER %d of %d, %s, Angel One (manual ticket)" % (idx, total, acct)]
+    for part in plain_parts(order):
+        lines.append("  " + part)
+    if order.get("lot_size"):
+        lines.append("  lot size %s: qty %s is %s lot(s)" % (order["lot_size"], order.get("qty"),
+                                                             int(float(order.get("qty", 0))) // int(order["lot_size"])))
+    if order.get("why"):
+        lines.append("  why: " + order["why"])
+    lines.append("  " + label)
+    for w in (rv or {}).get("warnings", []):
+        lines.append("  note: " + w)
+    lines.append("  STATUS: PROPOSED. Nothing has been sent: there is no Angel One connection here, and this")
+    lines.append("  pack never logs in to a broker or stores a password, PIN or TOTP secret.")
+    lines.append("  Enter it yourself in the Angel One app, leg by leg:")
+    for L in legs:
+        price = L.get("triggerprice") and "trigger %s, limit %s" % (L["triggerprice"], L["price"]) if \
+            L["ordertype"] == "STOPLOSS_LIMIT" else (("trigger " + L["triggerprice"]) if L.get("triggerprice") else
+                                                     ("price " + L["price"] if L["price"] != "0" else "market"))
+        lines.append("    %s: %s %s %s on %s, %s, %s, product %s, %s" % (
+            L["_leg"], L["transactiontype"], L["quantity"], L["tradingsymbol"], L["exchange"], L["ordertype"],
+            price, L["producttype"], L["duration"]))
+    lines.append("  Legs 2 and 3 are not linked: when one fills, cancel the other. Square off by the flat-by time;")
+    lines.append("  the broker squares off INTRADAY positions itself from about 15:15-15:20 IST.")
+    lines.append("  SmartAPI placeOrder fields (for a SmartAPI client you run on your own computer, never here):")
+    for L in legs:
+        lines.append("    " + json.dumps({k: v for k, v in L.items() if not k.startswith("_")}, sort_keys=True))
+    if ready:
+        lines.append("  Reply \"yes\" to record your decision for this one order, or \"no\" to skip it.")
+        lines.append("  A yes is recorded only: you still place it yourself, then report it with ticket.py result.")
+    return "\n".join(lines), ready
+
+
 def ticket_json(order, idx, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
     loss, stop = max_loss(order)
+    if broker_for(order, cfg) in ("angelone", "manual"):
+        legs, _ = angel_legs(order)
+        return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+                "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)), "broker": "angelone",
+                "tool": None, "manual": True, "order_status": "proposed (not sent)",
+                "smartapi_legs": [{k: v for k, v in L.items() if not k.startswith("_")} for L in legs],
+                "leg_notes": [L["_leg"] for L in legs], "why": order.get("why", ""),
+                "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
     return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
             "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
@@ -465,6 +613,8 @@ def _load(a):
     if not isinstance(orders, list) or not orders:
         raise TicketError("no orders in %s" % a.orders)
     cfg = read_json(a.config, "config", required=False) or {}
+    first = next((o for o in orders if isinstance(o, dict) and o.get("symbol")), {})
+    use_market(str(first.get("symbol") or ""), money=str(cfg.get("account_currency") or "USD").upper())
     risk = read_json(a.risk, "risk check", required=False)
     state = load_state(a.state)
     now, today = _clock(a)
@@ -516,6 +666,18 @@ def cmd_approve(a):
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
+    if broker_for(order, cfg) in ("angelone", "manual"):
+        rec["broker"] = "angelone"
+        rec["status"] = "approved (manual: not sent)"
+        write_json(a.state, state)
+        if cfg.get("paper", True):
+            print("PAPER: do not place it. Record a fill only at a price the market really traded:")
+            print("  ticket.py fill --symbol %s --side %s --qty %s --price PRICE" % (rec["symbol"], rec["side"], rec["qty"]))
+        else:
+            print("Nothing was sent. Place it yourself in the Angel One app, leg by leg (ticket.py show --index %d)," % a.index)
+            print("then record what Angel One says: ticket.py result --index %d --status placed --broker-id ORDER_ID"
+                  % a.index)
+        return 0
     if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
     else:

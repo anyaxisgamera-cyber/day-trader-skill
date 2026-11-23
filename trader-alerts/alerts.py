@@ -99,6 +99,52 @@ EARLY = datetime.time(13, 0)
 class AlertError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise AlertError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time
 
@@ -198,7 +244,8 @@ def stooq_url(sym):
 
 
 def yahoo_url(sym, host=YAHOO_HOSTS[0]):
-    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
+    return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (
+        host, market_yahoo(sym, sym.upper().replace(".", "-")).replace("^", "%5E"))
 
 
 def parse_stooq(text, sym):
@@ -543,6 +590,20 @@ def _dedupe(items):
 
 
 def cmd_clock(a):
+    if getattr(a, "market", None) and MK is not None:
+        rows = []
+        for w in a.market:
+            code = w.upper() if w.upper() in MK.EXCHANGES else MK.market_of(w, MK.Lookups())[0]
+            rows.append(MK.market_status(code, MK.parse_now(a.now) if a.now else None))
+        if a.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            for st in rows:
+                print("%s %s: %s %s (%s)%s%s" % (st["exchange"], st["name"], st["phase"].upper(), st["local_time"],
+                                                 st["tz_label"], (" next open " + st["next_open_local"])
+                                                 if st.get("next_open_local") else "",
+                                                 ("  [%s]" % st["reason"]) if st.get("reason") else ""))
+        return 0 if all(r.get("is_open") for r in rows) else 1
     st = market_status(parse_now(a.now))
     if a.json:
         print(json.dumps(st, indent=2))
@@ -574,9 +635,14 @@ def cmd_quote(a):
             q = quotes.get(s)
             if q:
                 chg = ""
+                cur = "$"
+                if MK is not None:
+                    c_ = MK.resolve(s, MK.Lookups()).get("currency") or "USD"
+                    cur = "$" if c_ == "USD" else MK.CURRENCY_SIGN.get(c_, c_ + " ")
                 if q.get("prev_close"):
-                    chg = " (%+.2f%% vs prev close $%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), q["prev_close"])
-                print("%-6s $%.2f%s  %s  [%s]" % (s, q["price"], chg, q.get("time", ""), q["source"]))
+                    chg = " (%+.2f%% vs prev close %s%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), cur,
+                                                              q["prev_close"])
+                print("%-6s %s%.2f%s  %s  [%s]" % (s, cur, q["price"], chg, q.get("time", ""), q["source"]))
         for e in errors:
             print("error: " + e)
         if a.write and quotes:
@@ -585,14 +651,46 @@ def cmd_quote(a):
     return 0 if quotes else 1
 
 
+def _rule_market(r):
+    if MK is None:
+        return "NYSE"
+    if r.get("market"):
+        return str(r["market"]).upper()
+    if r.get("symbol"):
+        code = MK.market_of(str(r["symbol"]), MK.Lookups())[0]
+        return "NYSE" if code in ("NASDAQ", "CRYPTO", "FX", "CME") else ("NSE" if code in ("NFO", "BFO") else code)
+    return "NYSE"
+
+
 def cmd_check(a):
     doc = _read(a.rules, None)
     if not doc or not doc.get("rules"):
         raise AlertError("no rules in %s: add some with alerts.py add --from-plan" % a.rules)
-    rules = doc["rules"]
+    groups = {}
+    for r in doc["rules"]:
+        groups.setdefault(_rule_market(r), []).append(r)
+    if len(groups) == 1:
+        return _check_group(a, list(groups)[0], doc["rules"])
+    code = 1
+    for m in sorted(groups):
+        code = min(code, _check_group(a, m, groups[m]))
+    return code
+
+
+def _check_group(a, market, rules):
+    if MK is not None:
+        sym = next((str(r["symbol"]) for r in rules if r.get("symbol")), None)
+        if sym:
+            use_market(sym)
+        elif market != "NYSE":
+            MK.bind(globals(), market)
+            MK.localize(market)
+            globals()["MARKET"] = market
     now = parse_now(a.now)
     status = market_status(now)
     watched = [r for r in rules if active(r, status["date"])]
+    if a.source == "stooq" and MARKET != "NYSE":
+        raise AlertError("Stooq quotes here are US-only: use --source yahoo for %s" % MARKET)
     syms = _dedupe([str(r.get("symbol", "")).upper() for r in watched if r.get("type") not in NO_QUOTE])
     quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
@@ -725,7 +823,8 @@ def main(argv=None):
         p.add_argument("--now", help="pretend it is this time (no offset = New York time)")
         p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("clock", help="is the NYSE open?")
+    p = sub.add_parser("clock", help="is the NYSE open? (or any market: clock NSE RELIANCE 7203.T)")
+    p.add_argument("market", nargs="*", help="exchange codes or symbols (default: the NYSE)")
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("quote", help="latest delayed quotes")

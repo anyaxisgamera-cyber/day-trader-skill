@@ -1,0 +1,8 @@
+Symbol|Name|Exchange
+AAPL|Apple Inc. - Common Stock|NASDAQ
+STX|Seagate Technology Holdings PLC - Ordinary Shares (Ireland)|NASDAQ
+TSLA|Tesla, Inc.  - Common Stock|NASDAQ
+BRK.B|Berkshire Hathaway Inc. New Common Stock|NYSE
+CCL|Carnival Corporation Ltd. Common Shares|NYSE
+INFY|Infosys Limited American Depositary Shares|NYSE
+SPY|State Street SPDR S&P 500 ETF Trust|NYSE Arca

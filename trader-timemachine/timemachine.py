@@ -107,6 +107,52 @@ EARLY_MIN = 13 * 60
 class TMError(Exception):
     pass
 
+# ---------------------------------------------------------------- one system, every market
+# The trader-markets skill installed next to this one knows every exchange's
+# hours, holidays and clock. With it, this tool runs on the instrument's own
+# market (RELIANCE on NSE in IST, 7203.T in Tokyo, AAPL in New York); without
+# it, the tool keeps its original New York market.
+
+MARKET = "NYSE"
+
+
+def _market_brain():
+    import importlib.util
+    d = os.environ.get("TRADER_MARKETS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                              "..", "trader-markets")
+    path = os.path.join(d, "markets.py")
+    if not os.path.exists(path):
+        return None
+    if "trader_markets_brain" in sys.modules:
+        return sys.modules["trader_markets_brain"]
+    spec = importlib.util.spec_from_file_location("trader_markets_brain", path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["trader_markets_brain"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+MK = _market_brain()
+
+
+def use_market(symbol, continuous=False, money=None):
+    """Run this tool on `symbol`'s own exchange. -> (exchange code, resolved instrument)."""
+    if MK is None or not symbol:
+        return MARKET, {}
+    try:
+        return MK.adopt(globals(), symbol, continuous=continuous, money=money)
+    except MK.MarketError as e:
+        raise TMError(str(e))
+
+
+def market_yahoo(sym, fallback):
+    """The Yahoo symbol for `sym` (RELIANCE -> RELIANCE.NS, BRK.B -> BRK-B)."""
+    if MK is None:
+        return fallback
+    inst = MK.resolve(sym, MK.Lookups())
+    return inst.get("yahoo") or fallback
+
+
 
 # ---------------------------------------------------------------- time (copied from trader-alerts)
 
@@ -187,7 +233,7 @@ def clock24(minutes):
 
 def chart_url(sym, host="query2"):
     return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (
-        host, urllib.parse.quote(sym.upper().replace(".", "-")))
+        host, urllib.parse.quote(market_yahoo(sym, sym.upper().replace(".", "-"))))
 
 
 def _sleep(seconds):
@@ -315,9 +361,18 @@ def split_sessions(bars):
     return days
 
 
+MAX_FILL = 4   # outside the US, Yahoo's 5-minute feed drops a few bars a day (e.g. NSE): fill at most this many
+FILLED = []
+
+
 def full_sessions(days, before):
     """Full sessions (all 78 bars) strictly before the plan's date, oldest first,
-    and the short ones that were left out (half days, gaps)."""
+    and the short ones that were left out (half days, gaps).
+
+    On a market other than the NYSE a session missing up to MAX_FILL bars (never
+    the first) is kept: each missing bar becomes a flat bar at the previous close
+    with no volume, and FILLED records how many, so the report can say so."""
+    del FILLED[:]
     full, short = [], []
     for d in sorted(days):
         if d >= before:
@@ -325,6 +380,17 @@ def full_sessions(days, before):
         s = days[d]
         if len(s) == SESSION_BARS:
             full.append((d, [s[i] for i in range(SESSION_BARS)]))
+        elif MARKET != "NYSE" and 0 in s and SESSION_BARS - len(s) <= MAX_FILL and max(s) < SESSION_BARS:
+            row = []
+            for i in range(SESSION_BARS):
+                if i in s:
+                    row.append(s[i])
+                else:
+                    c = row[-1]["c"]
+                    row.append({"date": d, "slot": i, "start": row[-1]["start"], "o": c, "h": c, "l": c, "c": c,
+                                "v": 0, "filled": True})
+            FILLED.append((d, SESSION_BARS - len(s)))
+            full.append((d, row))
         else:
             short.append({"date": d, "bars": len(s)})
     return full, short
@@ -525,13 +591,14 @@ def load_plan(a, now_utc):
         if not isinstance(raw, dict):
             raise TMError("%s is not a plan" % a.plan)
         src = a.plan
+    use_market(str(raw.get("symbol") or ""), continuous=True)
     return normalize_plan(raw, src)
 
 
 def normalize_plan(raw, src="flags"):
     """A plan dict (trader/plan.json shape) -> the checked plan the time machine runs."""
     sym = str(raw.get("symbol") or "").strip().upper()
-    if not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
+    if not re.match(r"^[A-Z0-9^][A-Z0-9.&_=^\-]{0,24}$", sym):
         raise TMError("the plan needs a ticker symbol, got %r" % raw.get("symbol"))
     side = str(raw.get("side") or "buy").lower()
     if side not in ("buy", "sell"):
@@ -569,7 +636,8 @@ def normalize_plan(raw, src="flags"):
     if k is None:
         raise TMError("the plan needs entry_time (the entry bar's close, e.g. 10:15 AM) or entry_bar")
     if not 0 <= k <= SESSION_BARS - 2:
-        raise TMError("the entry must close between 9:35 AM and 3:55 PM to leave bars to replay "
+        raise TMError("the entry must close between " + clock12(OPEN_MIN + 5) + " and " + clock12(CLOSE_MIN - 5) +
+                      " to leave bars to replay "
                       "(got %s)" % clock12(OPEN_MIN + 5 * (k + 1)))
     orng = raw.get("opening_range") or {}
     or_min = orng.get("minutes", 15) if isinstance(orng, dict) else 15
@@ -686,7 +754,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
     msym = str(meta.get("symbol") or "").upper()
-    if msym and msym != sym.replace(".", "-"):
+    if msym and msym not in (sym.replace(".", "-"), market_yahoo(sym, sym).upper()):
         raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
     gran = meta.get("dataGranularity")
     if gran and gran != "5m":
@@ -717,6 +785,10 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
         warn.append("the plan's entry %.2f is outside that bar's range %.2f to %.2f"
                     % (plan["entry"], eb["l"], eb["h"]))
     sessions, short = full_sessions(days, plan["date"])
+    if FILLED:
+        warn.append("%d of the %d sessions had missing 5-minute bars in Yahoo's %s feed (%d bars in all); each was "
+                    "filled as a flat bar at the previous close, which slightly understates volatility"
+                    % (len(FILLED), len(sessions), MARKET, sum(n for _, n in FILLED)))
     if len(sessions) < MIN_SESSIONS:
         raise TMError("only %d full session(s) of %s before %s in the data; the time machine needs at least %d"
                       % (len(sessions), sym, plan["date"], MIN_SESSIONS))

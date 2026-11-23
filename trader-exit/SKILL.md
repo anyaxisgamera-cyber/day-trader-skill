@@ -120,6 +120,14 @@ sizes it: a $50 max loss per trade buys floor(50 / 5.86) = 8 shares.
 It never places an order, never sizes a position, never widens a stop to
 make a plan pass, and never calls a stop a guarantee.
 
+## Markets (one system, India first)
+
+The plan uses the instrument's own exchange: on NSE, flat by 15:10 IST
+(brokers square off intraday positions from about 15:15), and the stop and
+target snap to the exchange tick from Angel One's scrip master (Rs 0.05 or
+0.10 for most NSE shares, Rs 1 on MCX). `plan.json` records `market`,
+`currency`, `tick_size` and, for F&O, `lot_size`.
+
 ## Safety
 
 - Education and tooling, not financial advice. A PASS is a rules check, not a recommendation.
